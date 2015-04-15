@@ -47,7 +47,7 @@ Test:INI_IdentifyLineType2()
 	result = INI_IdentifyLineType("\\;\r\n", p0s, p0e, p1s, p1e, p2s, p2e);
 	ASSERT(result == e_INI_LINE_TYPE_INVALID);
 	result = INI_IdentifyLineType("key =  ", p0s, p0e, p1s, p1e, p2s, p2e);
-	ASSERT(result == e_INI_LINE_TYPE_INVALID);
+	ASSERT(result == e_INI_LINE_TYPE_ENTRY); // Now allowed again!
 	result = INI_IdentifyLineType(" = value", p0s, p0e, p1s, p1e, p2s, p2e);
 	ASSERT(result == e_INI_LINE_TYPE_INVALID);
 	result = INI_IdentifyLineType("thing", p0s, p0e, p1s, p1e, p2s, p2e);
@@ -611,6 +611,8 @@ Test:INI_ParseInline()
 	num = 0;
 	INI_ParseFile("YSI/test_ini/test1.ini", "Inline1", .bFilter = true, .filter = "other");
 	ASSERT(num == 8);
+	// This line also seems to have the -O1 -d0 bug.  It must be caused by the
+	// extra "tag" parameter somehow...
 	inline Inline2(string:tag[], string:key[], string:value[])
 	{
 		#pragma unused key, value
@@ -722,10 +724,17 @@ static stock DoINI_Int3()
 		tk1[8];
 	inline Inl_(string:tag[], string:name[], string:value[])
 	{
+		// #emit NOP
+		// #emit NOP
+		// #emit NOP
+		// #emit NOP
 		// printf("%s (%d): %d %d %d", tag, YHash(tag, false),
 			// _I<>,
 			// _I<atag>,
 			// _I<tag2>);
+		// TODO:  I think there's a bug in here somewhere, with "GTYPE=0 MTYPE=1
+		// -O1 -d0", which crashes on ENTRY to this inlineю  I think that the
+		// problem may be too much, or incorrect, code being output.
 		switch (YHash(tag, false))
 		{
 			case _I<>:

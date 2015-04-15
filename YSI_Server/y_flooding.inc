@@ -87,7 +87,6 @@ Compile options:
 	-
 Operators:
 	-
-</remarks>
 \**--------------------------------------------------------------------------**/
 
 #if defined _INC_y_flooding
@@ -98,6 +97,7 @@ Operators:
 #include "..\YSI_Internal\y_version"
 #include "..\YSI_Data\y_iterate"
 #include "..\YSI_Core\y_debug"
+#include "..\YSI_Core\y_utils"
 #include "..\YSI_Coding\y_hooks"
 
 enum e_FLOOD_ACTION (+= 0x00010000)
@@ -108,12 +108,19 @@ enum e_FLOOD_ACTION (+= 0x00010000)
 	e_FLOOD_ACTION_BLOCK,
 	e_FLOOD_ACTION_KICK,
 	e_FLOOD_ACTION_BAN,
-	e_FLOOD_ACTION_FBAN
+	e_FLOOD_ACTION_FBAN,
+	e_FLOOD_ACTION_GHOST,
+	e_FLOOD_ACTION_OTHER
 }
 
 static
 	YSI_g_sPlayerIPs[MAX_PLAYERS],
 	e_FLOOD_ACTION:YSI_g_sMaxConnections = e_FLOOD_ACTION_COUNT | e_FLOOD_ACTION_BLOCK;
+
+forward OnFloodLimitExceeded(ip[16], count);
+
+stock
+	Iterator:FloodingPlayer<MAX_PLAYERS>;
 
 /**--------------------------------------------------------------------------**\
 <summary>SetMaxConnections</summary>
@@ -131,6 +138,8 @@ static
 	e_FLOOD_ACTION_KICK - Kick all players on this IP.
 	e_FLOOD_ACTION_BAN - Ban the IP and have players time out.
 	e_FLOOD_ACTION_FBAN - Ban the IP and kick all the players instantly.
+	e_FLOOD_ACTION_GHOST - Silently force all players on the IP to reconnect.
+	e_FLOOD_ACTION_OTHER - Call a callback.
 </remarks>
 \**--------------------------------------------------------------------------**/
 
@@ -141,7 +150,29 @@ stock SetMaxConnections(max = -1, e_FLOOD_ACTION:action = e_FLOOD_ACTION_BLOCK)
 }
 
 /**--------------------------------------------------------------------------**\
-<summary>Conn_OnPlayerConnect</summary>
+<summary>Flooding_UnbanIP</summary>
+<param name="ip32">32-bit representation of the IP to unban.</param>
+<returns>
+	-
+</returns>
+<remarks>
+	Timers, by default, are not good with strings, so we can't pass the IP to
+	unban in dot notation.  Fortunately, this is easilly solved.
+</remarks>
+\**--------------------------------------------------------------------------**/
+
+forward Flooding_UnbanIP(ip32);
+
+public Flooding_UnbanIP(ip32)
+{
+	new
+		cmd[24] = "unbanip ";
+	format(cmd[8], 16, "%d.%d.%d.%d", ip32 >>> 24, (ip32 >>> 16) & 0xFF, (ip32 >>> 8) & 0xFF, ip32 & 0xFF);
+	SendRconCommand(cmd);
+}
+
+/**--------------------------------------------------------------------------**\
+<summary>OnPlayerConnect</summary>
 <param name="playerid">Player who joined.</param>
 <returns>
 	-
@@ -157,52 +188,41 @@ stock SetMaxConnections(max = -1, e_FLOOD_ACTION:action = e_FLOOD_ACTION_BLOCK)
 
 hook OnPlayerConnect(playerid)
 {
+	new
+		ret = 1;
 	if ((YSI_g_sMaxConnections & e_FLOOD_ACTION_COUNT) != e_FLOOD_ACTION_COUNT)
 	{
 		new
-			ip[16],
-			count = 0;
+			ip[16];
 		GetPlayerIp(playerid, ip, sizeof (ip));
 		new
-			IP = strval(ip) << 24,
-			pos = 0;
-		while (pos < 15 && ip[pos++] != '.') {}
-		IP += strval(ip[pos]) << 16;
-		while (pos < 15 && ip[pos++] != '.') {}
-		IP += strval(ip[pos]) << 8;
-		while (pos < 15 && ip[pos++] != '.') {}
-		IP += strval(ip[pos]);
-		
-		YSI_g_sPlayerIPs[playerid] = IP;
+			ip32 = IPToInt(ip);
+		YSI_g_sPlayerIPs[playerid] = ip32;
 		foreach (new i : Player)
 		{
-			if (YSI_g_sPlayerIPs[i] == IP)
+			if (YSI_g_sPlayerIPs[i] == ip32)
 			{
-				++count;
+				Iter_Add(FloodingPlayer, i);
 			}
 		}
-		if (count > _:(YSI_g_sMaxConnections & e_FLOOD_ACTION_COUNT))
+		if (Iter_Count(FloodingPlayer) > _:(YSI_g_sMaxConnections & e_FLOOD_ACTION_COUNT))
 		{
 			P:I("Max Connections exceeded");
+			ret = 0;
 			switch (YSI_g_sMaxConnections & e_FLOOD_ACTION_ACTION)
 			{
 				case e_FLOOD_ACTION_BLOCK:
 				{
 					// Kick the latest player.
 					Kick(playerid);
-					return 0;
 				}
 				case e_FLOOD_ACTION_KICK:
 				{
 					// Kick all the players.
-					foreach (new i : Player)
+					foreach (new i : FloodingPlayer)
 					{
-						if (YSI_g_sPlayerIPs[i] == IP)
-						{
-							Kick(i);
-						}
+						Kick(i);
 					}
-					return 0;
 				}
 				case e_FLOOD_ACTION_BAN:
 				{
@@ -214,23 +234,34 @@ hook OnPlayerConnect(playerid)
 					// Ban the IP.
 					BanEx(playerid, "YSI max connections auto-ban");
 					// Kick all the players.
-					foreach (new i : Player)
+					foreach (new i : FloodingPlayer)
 					{
-						if (YSI_g_sPlayerIPs[i] == IP)
-						{
-							Kick(i);
-						}
+						Kick(i);
 					}
-					return 0;
 				}
-				default:
+				case e_FLOOD_ACTION_GHOST:
 				{
-					// Do nothing.
-					return 1;
+					// Time out all the players on the IP silently.
+					new
+						cmd[22] = "banip ";
+					strcat(cmd, ip);
+					SendRconCommand(cmd);
+					SetTimerEx("Flooding_UnbanIP", 10000, 0, "i", ip32);
+				}
+				case e_FLOOD_ACTION_OTHER:
+				{
+					ret = CallLocalFunction("OnFloodLimitExceeded", "si", ip, Iter_Count(FloodingPlayer));
 				}
 			}
 		}
-		return 0;
+		// Ultra fast iterator clear.
+		for (new i = Iter_Begin(FloodingPlayer); (ip32 = Iter_Next(FloodingPlayer, i)) != i; )
+		{
+			Iter_TrueArray(FloodingPlayer)[i] = i;
+			i = ip32;
+		}	
+		Iter_TrueCount(FloodingPlayer) = 0;
 	}
-	return 1;
+	return ret;
 }
+
